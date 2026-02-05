@@ -1,52 +1,36 @@
 import { ReviewEngine } from './engine';
 import { DeconstructionAgent, DevilsAdvocateAgent, JudgeAgent } from './agents';
 import { VertexAIAdapter } from './adapters/vertex_ai';
+import { OpenClawLLMAdapter } from './adapters/openclaw_llm';
 import { SerperSearchAdapter } from './adapters/serper_search';
 import { ArxivAdapter } from './adapters/arxiv';
+import { SkillSearchAdapter } from './adapters/skill_search';
 import { FileStorageAdapter } from './adapters/file_storage';
 import { MeritReport } from './types';
+import { ILLMProvider, ISearchProvider } from './ports';
+
 import dotenv from 'dotenv';
 import path from 'path';
 
 dotenv.config();
 
-export interface PeerReviewerConfig {
-  googleCredentialsPath?: string;
-  vertexAIModel?: string;
-  vertexAILocation?: string;
-  serperApiKey?: string;
-  dataDir?: string;
-}
+// Re-export core classes for standalone usage
+export { ReviewEngine } from './engine';
+export { OpenClawLLMAdapter } from './adapters/openclaw_llm';
+export { SkillSearchAdapter } from './adapters/skill_search';
+export * from './types';
+export * from './ports';
 
 export class PeerReviewer {
   private engine: ReviewEngine;
   private storage: FileStorageAdapter;
 
-  constructor(config: PeerReviewerConfig = {}) {
-    const googleCredentialsPath = config.googleCredentialsPath || process.env.GOOGLE_CREDENTIALS_PATH || './google.json';
-    const vertexAIModel = config.vertexAIModel || process.env.VERTEX_AI_MODEL || 'gemini-3-pro-preview';
-    const vertexAILocation = config.vertexAILocation || process.env.VERTEX_AI_LOCATION || 'us-central1';
-    const serperApiKey = config.serperApiKey || process.env.SERPER_API_KEY || '7edbc239394bb9b75ce5543fb6987ba4256b3269';
-    const dataDir = config.dataDir || './data';
-
-    // Initialize Adapters
-    const llm = new VertexAIAdapter(googleCredentialsPath, vertexAIModel, vertexAILocation);
-    const serperSearch = new SerperSearchAdapter(serperApiKey);
-    const arxivSearch = new ArxivAdapter();
+  constructor(llm: ILLMProvider, search: ISearchProvider, dataDir: string = './data') {
     this.storage = new FileStorageAdapter(dataDir);
-
-    // Composite Search Provider
-    const searchProvider = {
-      findContradictions: async (claim: string) => {
-        const serperResults = await serperSearch.findContradictions(claim);
-        const arxivResults = await arxivSearch.findContradictions(claim);
-        return [...serperResults, ...arxivResults];
-      }
-    };
 
     this.engine = new ReviewEngine(
       new DeconstructionAgent(llm),
-      new DevilsAdvocateAgent(llm, searchProvider),
+      new DevilsAdvocateAgent(llm, search),
       new JudgeAgent(llm)
     );
   }
@@ -62,34 +46,72 @@ export class PeerReviewer {
   }
 }
 
-// Standalone execution support
+// Helper to composite search providers
+class CompositeSearchProvider implements ISearchProvider {
+  constructor(private providers: ISearchProvider[]) {}
+  
+  async findContradictions(claim: string): Promise<string[]> {
+    const results = await Promise.all(this.providers.map(p => p.findContradictions(claim)));
+    return results.flat();
+  }
+}
+
+// Standalone CLI execution
 if (require.main === module) {
   (async () => {
-    const paperText = `
-    Title: Entropic Convergence in Over-Parameterized Neural Networks
-    ... (truncated for brevity, pass full text in CLI args or file) ...
-    `;
-    
-    // Check for file arg
+    // CLI Argument Parsing
     const args = process.argv.slice(2);
-    let textToReview = paperText;
-    
-    if (args.length > 0) {
-        const fs = require('fs');
-        try {
-            if (fs.existsSync(args[0])) {
-                textToReview = fs.readFileSync(args[0], 'utf-8');
-            } else {
-                textToReview = args[0];
-            }
-        } catch (e) {
-            console.error("Error reading input:", e);
-            process.exit(1);
+    if (args.length === 0) {
+        console.error("Usage: node dist/index.js <file_or_text>");
+        process.exit(1);
+    }
+
+    let textToReview = args[0];
+    const fs = require('fs');
+    try {
+        if (fs.existsSync(textToReview)) {
+            textToReview = fs.readFileSync(textToReview, 'utf-8');
         }
+    } catch (e) {
+        // Assume raw text
     }
 
     console.log("Initializing Peer Reviewer...");
-    const reviewer = new PeerReviewer();
+
+    // --- ADAPTER SELECTION LOGIC ---
+    
+    // 1. Select LLM Provider
+    let llm: ILLMProvider;
+    // Check for explicit Vertex/Google creds file first (legacy/specific mode)
+    if (fs.existsSync('./google.json') || process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+        console.log("Using VertexAIAdapter (Google Credentials detected)");
+        llm = new VertexAIAdapter();
+    } else {
+        console.log("Using OpenClawLLMAdapter (Env vars detected)");
+        llm = new OpenClawLLMAdapter();
+    }
+
+    // 2. Select Search Provider
+    // We combine Arxiv (always free/easy) with either SkillSearch (if available) or SerperDirect
+    const providers: ISearchProvider[] = [new ArxivAdapter()];
+
+    // Check if serper-tool is available in path or parallel directory
+    // For development convenience, we check the relative path
+    const devSerperPath = path.resolve(__dirname, '../../serper-tool/dist/index.js');
+    
+    if (fs.existsSync(devSerperPath)) {
+         console.log(`Using SkillSearchAdapter (via ${devSerperPath})`);
+         providers.push(new SkillSearchAdapter(`node ${devSerperPath}`));
+    } else if (process.env.SERPER_API_KEY) {
+         console.log("Using SerperSearchAdapter (Direct API)");
+         providers.push(new SerperSearchAdapter(process.env.SERPER_API_KEY));
+    }
+
+    const search = new CompositeSearchProvider(providers);
+
+    // --- EXECUTION ---
+    
+    const reviewer = new PeerReviewer(llm, search);
     
     try {
         console.log("Reviewing paper...");
