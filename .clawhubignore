@@ -1,0 +1,25 @@
+# Ignore standard Node.js stuff
+node_modules/
+dist/
+.git/
+.DS_Store
+
+# Ignore secrets explicitly
+.env
+google.json
+credentials.json
+*.key
+
+# Ignore data output
+data/
+logs/
+
+# Ignore source maps if we want smaller bundles
+**/*.map
+
+# Keep source and docs
+!src/
+!SKILL.md
+!README.md
+!package.json
+!tsconfig.json

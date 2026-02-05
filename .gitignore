@@ -1,0 +1,28 @@
+# Node.js
+node_modules/
+dist/
+npm-debug.log
+yarn-error.log
+package-lock.json
+
+# Environment & Secrets
+.env
+google.json
+credentials.json
+*.key
+*.pem
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Logs & Data
+logs/
+data/reports/
+*.log
+
+# Test & Coverage
+coverage/
+.nyc_output/
